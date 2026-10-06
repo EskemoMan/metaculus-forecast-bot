@@ -285,6 +285,12 @@ class LlmPool:
                         self.ledger.save()
                         errors.append(f"{spec.label}: daily quota")
                         break
+                    status = _status_code(error)
+                    if status in (500, 502, 503, 504) and attempt == 0 and self._time_left() > 90:
+                        delay = random.uniform(8, 15)
+                        logger.warning(f"[pool] {spec.label}: server error {status}, retrying in {delay:.0f}s")
+                        await asyncio.sleep(delay)
+                        continue
                     if is_rate_limit_error(error):
                         if attempt == 0 and self._time_left() > retry_delay_seconds(error) + 60:
                             delay = retry_delay_seconds(error) + random.uniform(1, 4)

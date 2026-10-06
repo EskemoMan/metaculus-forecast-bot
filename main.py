@@ -635,13 +635,14 @@ def build_bot(pool: LlmPool, publish: bool, quiet: bool, samples: int) -> Future
 async def check_models(pool: LlmPool) -> None:
     """One tiny call per configured model plus one Tavily search; prints OK/FAILED per item."""
     for spec in pool.specs:
-        single = LlmPool([spec], pool.ledger)
-        role = spec.roles[0]
+        # Direct call (not through the pool) so the provider's raw error message is visible.
+        # Safe for public logs: the prompt is trivial and no question data is involved.
         try:
-            text, _ = await single.call("Reply with the single word: ready", role=role)
+            pool.ledger.add(spec.label)
+            text = await pool._make_llm(spec, spec.timeout).invoke("Reply with the single word: ready")
             print(f"  {spec.label}: OK ({text.strip()[:30]!r})")
         except Exception as error:  # noqa: BLE001
-            print(f"  {spec.label}: FAILED {type(error).__name__}: {str(error)[:300]}")
+            print(f"  {spec.label}: FAILED {type(error).__name__}: {str(error)[:500]}")
     if os.getenv("TAVILY_API_KEY"):
         try:
             results = await asyncio.to_thread(tavily_search, "Metaculus forecasting tournament", max_results=2)
