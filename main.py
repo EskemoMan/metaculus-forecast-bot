@@ -665,6 +665,7 @@ def main() -> None:
         help="wall-clock budget from process start (the job timeout is 55 min)",
     )
     parser.add_argument("--no-publish", action="store_true")
+    parser.add_argument("--max-questions", type=int, default=6, help="test_questions mode only")
     args = parser.parse_args()
     mode: Literal["tournament", "test_questions", "check_models"] = args.mode
 
@@ -691,8 +692,15 @@ def main() -> None:
     if mode == "test_questions":
         bot = build_bot(pool, publish=publish, quiet=False, samples=args.samples)
         bot.skip_previously_forecasted_questions = False
+        # One question per type, to test every code path without burning the daily free quota.
+        questions = MetaculusClient().get_all_open_questions_from_tournament(BOT_TESTING_AREA)
+        by_type: dict[str, MetaculusQuestion] = {}
+        for question in questions:
+            by_type.setdefault(type(question).__name__, question)
+        chosen = list(by_type.values())[: args.max_questions]
+        print(f"bot-testing-area: {len(questions)} open; testing types {[type(q).__name__ for q in chosen]}")
         try:
-            reports = asyncio.run(bot.forecast_on_tournament(BOT_TESTING_AREA, return_exceptions=True))
+            reports = asyncio.run(bot.forecast_questions(chosen, return_exceptions=True))
         finally:
             pool.ledger.save()
         print(f"Pool stats: {pool.stats()}")
