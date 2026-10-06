@@ -1,51 +1,63 @@
 name: Test Bot
 
+# Manual smoke tests. "check_models" makes one tiny call per configured model plus one web
+# search, without touching Metaculus questions. "test_questions" forecasts on the public
+# bot-testing-area tournament, the only place it is OK to inspect the bot's forecasts.
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: What to test
+        type: choice
+        options:
+          - check_models
+          - test_questions
+        default: check_models
+      samples:
+        description: Forecast samples per question (test_questions only)
+        default: "2"
 
-# Add concurrency group to prevent parallel runs
+# Same group as the tournament workflow: tests never overlap live runs on the same API key/ledger.
 concurrency:
-  group: ${{ github.workflow }}
+  group: forecast-bot
   cancel-in-progress: false
 
+permissions:
+  contents: read
 
-# Daily job to run the simple forecast bot
 jobs:
-  forecast_job:
-    runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
-    steps: # sets up the steps that will be run in order
-      # setup repository with all necessary dependencies - keep as is
-      - name: Check out repository
-        uses: actions/checkout@v4
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - name: Install poetry
-        uses: snok/install-poetry@v1
-        with:
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-          installer-parallel: true
-      # Adding the below will make the workflow faster, but will mean you don't automatically get updates from forecasting-tools and other packages
-      # - name: Load cached venv
-      #   id: cached-poetry-dependencies
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: .venv
-      #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+          python-version: "3.12"
+          cache: pip
       - name: Install dependencies
-        run: poetry install --no-interaction --no-root
-      - name: Run bot
-        run: |
-          poetry run python main.py --mode test_questions
-        # this reads the environment variables from the github repository.
-        # Store under Settings --> Secrets and variables --> Actions
+        run: pip install -r requirements.txt
+      # Tests spend the same daily free-tier quota as the tournament runs.
+      - name: Restore daily LLM usage ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: .usage
+          key: llm-usage-${{ github.run_id }}
+          restore-keys: llm-usage-
+      - name: Run test
+        run: python main.py --mode ${{ inputs.mode }} --samples ${{ inputs.samples }}
         env:
-          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          BOT_MODEL_POOL: ${{ vars.BOT_MODEL_POOL }}
+      - name: Save daily LLM usage ledger
+        if: always() && hashFiles('.usage/usage.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .usage
+          key: llm-usage-${{ github.run_id }}-${{ github.run_attempt }}

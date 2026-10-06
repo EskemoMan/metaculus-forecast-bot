@@ -1,0 +1,24 @@
+name: Keep scheduled workflows enabled
+
+# GitHub disables scheduled workflows in public repos after 60 days without repository
+# activity. This re-enables them weekly (the tournament runs into January).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-enable workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for wf in run_bot_on_tournament.yaml keepalive.yaml; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$wf/enable" && echo "enabled $wf"
+          done
