@@ -477,6 +477,31 @@ def _close_time_key(question: MetaculusQuestion) -> float:
     return float("inf") if question.close_time is None else question.close_time.timestamp()
 
 
+def failure_causes(error: BaseException | None, limit: int = 4) -> str:
+    """Leaf exception types + sanitized messages (numbers masked) for a failed question."""
+    leaves: list[BaseException] = []
+
+    def walk(exc: BaseException | None, depth: int = 0) -> None:
+        if exc is None or depth > 8:
+            return
+        subs = getattr(exc, "exceptions", None)
+        if subs:
+            for sub in subs:
+                walk(sub, depth + 1)
+        elif exc.__cause__ is not None:
+            walk(exc.__cause__, depth + 1)
+        else:
+            leaves.append(exc)
+
+    walk(error)
+    counts: dict[str, int] = {}
+    for leaf in leaves:
+        key = f"{type(leaf).__name__}: {sanitize(str(leaf), 90)}"
+        counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: -item[1])[:limit]
+    return "; ".join(f"{key} (x{n})" for key, n in ranked) or "unknown"
+
+
 def _question_key(question: MetaculusQuestion) -> str:
     return str(question.id_of_question or question.id_of_post or question.page_url)
 
@@ -580,7 +605,7 @@ async def run_tournaments(
                 summary["forecast"].append(question.page_url)
                 print(f"  forecast ok ({samples} samples): {question.page_url}")
             else:
-                reason = sanitize(f"{type(result).__name__}: {result}")
+                reason = f"{type(result).__name__}; causes: {failure_causes(result)}"
                 summary["failed"].append((question.page_url, key, reason))
                 print(f"  FAILED: {question.page_url} ({reason})")
     bot.pool.deadline = None
@@ -643,6 +668,17 @@ async def check_models(pool: LlmPool) -> None:
             print(f"  {spec.label}: OK ({text.strip()[:30]!r})")
         except Exception as error:  # noqa: BLE001
             print(f"  {spec.label}: FAILED {type(error).__name__}: {str(error)[:500]}")
+    # Metaculus' own LLM proxy (authenticated by the bot token); access may depend on credits.
+    from forecasting_tools import GeneralLlm
+
+    for proxy_model in ("metaculus/gpt-4o-mini", "metaculus/gpt-4o", "metaculus/claude-sonnet-4-20250514"):
+        try:
+            text = await GeneralLlm(model=proxy_model, allowed_tries=1, timeout=60).invoke(
+                "Reply with the single word: ready"
+            )
+            print(f"  proxy {proxy_model}: OK ({text.strip()[:30]!r})")
+        except Exception as error:  # noqa: BLE001
+            print(f"  proxy {proxy_model}: FAILED {type(error).__name__}: {str(error)[:300]}")
     if os.getenv("TAVILY_API_KEY"):
         try:
             results = await asyncio.to_thread(tavily_search, "Metaculus forecasting tournament", max_results=2)

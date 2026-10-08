@@ -10,7 +10,8 @@ Free tiers have small per-minute and per-day request limits, so:
   same "You exceeded your current quota" text for per-minute limits; only the quotaId differs;
 - a per-minute 429 waits for the server's suggested retry delay (capped) and retries once; a
   second one benches the model for the rest of THIS run only;
-- requests the provider definitely rejected (HTTP 4xx/5xx) are refunded to the daily budget;
+- every attempt counts against the daily budget (Google counts failed/overloaded requests too);
+- a 5xx "overloaded" error moves straight on to the next model instead of retrying;
 - repeated non-quota failures bench a model for the rest of this run (circuit breaker);
 - an optional deadline stops trying new models when time is nearly up.
 Callers pass `start` to rotate which model is tried first, so the samples of one question are
@@ -244,14 +245,10 @@ class LlmPool:
         async with self._locks[spec.label]:
             await self._pace(spec)
             timeout = max(30.0, min(spec.timeout, self._time_left() - 10))
-            self.ledger.add(spec.label)  # reserve before calling so concurrent samples can't overshoot
-            try:
-                return await self._make_llm(spec, timeout).invoke(prompt)
-            except Exception as error:
-                status = _status_code(error)
-                if status is not None and 400 <= status < 600 and status != 408:
-                    self.ledger.add(spec.label, -1)  # provider rejected it: not served, refund
-                raise
+            # Count every attempt, failed ones included: observed Oct 2026, Google's free tier
+            # counts 503 "overloaded" responses against the daily request limit.
+            self.ledger.add(spec.label)
+            return await self._make_llm(spec, timeout).invoke(prompt)
 
     async def call(self, prompt: str, *, role: str = "forecast", start: int = 0) -> tuple[str, str]:
         """
@@ -286,11 +283,13 @@ class LlmPool:
                         errors.append(f"{spec.label}: daily quota")
                         break
                     status = _status_code(error)
-                    if status in (500, 502, 503, 504) and attempt == 0 and self._time_left() > 90:
-                        delay = random.uniform(8, 15)
-                        logger.warning(f"[pool] {spec.label}: server error {status}, retrying in {delay:.0f}s")
-                        await asyncio.sleep(delay)
-                        continue
+                    if status in (500, 502, 503, 504):
+                        # Overloaded: retrying the same model wastes quota; try the next model.
+                        logger.warning(f"[pool] {spec.label}: server error {status}, trying next model")
+                        errors.append(f"{spec.label}: {status}")
+                        if self.failures_by_model[spec.label] >= FAILURES_BEFORE_BENCH:
+                            self._benched.add(spec.label)
+                        break
                     if is_rate_limit_error(error):
                         if attempt == 0 and self._time_left() > retry_delay_seconds(error) + 60:
                             delay = retry_delay_seconds(error) + random.uniform(1, 4)

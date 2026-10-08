@@ -74,18 +74,41 @@ def test_per_minute_429_retries_same_model_and_is_not_persisted(monkeypatch):
     assert "a" not in pool.ledger.exhausted
 
 
-def test_rejected_requests_are_refunded(tmp_path, monkeypatch):
+def test_failed_requests_still_count_against_daily_budget(tmp_path, monkeypatch):
+    # Google's free tier counts overloaded (503) requests toward the daily limit.
     ledger = UsageLedger(str(tmp_path / "u.json"))
     pool = LlmPool([ModelSpec(label="a", model="x/a", rpm=10000, rpd=5)], ledger)
 
     class FakeLlm:
         async def invoke(self, prompt):
-            raise StatusError("400 bad request", 400)
+            raise StatusError("503 model overloaded", 503)
 
     monkeypatch.setattr(pool, "_make_llm", lambda spec, timeout: FakeLlm())
     with pytest.raises(AllModelsFailed):
         asyncio.run(pool.call("hi"))
-    assert ledger.used("a") == 0
+    assert ledger.used("a") == 1
+
+
+def test_overloaded_model_moves_to_next_without_retry(monkeypatch):
+    pool = LlmPool([ModelSpec(label="a", model="x/a", rpm=10000), ModelSpec(label="b", model="x/b", rpm=10000)])
+    calls = []
+
+    async def busy_a(spec, prompt):
+        calls.append(spec.label)
+        if spec.label == "a":
+            raise StatusError("503 UNAVAILABLE", 503)
+        return "ok"
+
+    monkeypatch.setattr(pool, "_call_one", busy_a)
+    assert asyncio.run(pool.call("hi")) == ("ok", "b")
+    assert calls == ["a", "b"]
+
+
+def test_failure_causes_lists_leaf_errors_without_numbers():
+    group = ExceptionGroup("outer", [parsing.ParseError("bad 0.42"), AllModelsFailed("a: 503"), AllModelsFailed("a: 503")])
+    text = main.failure_causes(group)
+    assert "AllModelsFailed" in text and "ParseError" in text
+    assert "0.42" not in text and "(x2)" in text
 
 
 def test_repeated_failures_bench_model_for_run(monkeypatch):
