@@ -668,17 +668,6 @@ async def check_models(pool: LlmPool) -> None:
             print(f"  {spec.label}: OK ({text.strip()[:30]!r})")
         except Exception as error:  # noqa: BLE001
             print(f"  {spec.label}: FAILED {type(error).__name__}: {str(error)[:500]}")
-    # Metaculus' own LLM proxy (authenticated by the bot token); access may depend on credits.
-    from forecasting_tools import GeneralLlm
-
-    for proxy_model in ("metaculus/gpt-4o-mini", "metaculus/gpt-4o", "metaculus/claude-sonnet-4-20250514"):
-        try:
-            text = await GeneralLlm(model=proxy_model, allowed_tries=1, timeout=60).invoke(
-                "Reply with the single word: ready"
-            )
-            print(f"  proxy {proxy_model}: OK ({text.strip()[:30]!r})")
-        except Exception as error:  # noqa: BLE001
-            print(f"  proxy {proxy_model}: FAILED {type(error).__name__}: {str(error)[:300]}")
     if os.getenv("TAVILY_API_KEY"):
         try:
             results = await asyncio.to_thread(tavily_search, "Metaculus forecasting tournament", max_results=2)
